@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CP-DLE</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="header">
+    <div class="led-row"><span class="led"></span> SYSTEM ONLINE — CP DATABASE</div>
+    <h1>CP<span>-DLE</span></h1>
+    <p class="subtitle">ทายว่าเพื่อนใน CP คนนี้คือใครจากข้อมูล เพศ / ส่วนสูง / LAB / แว่นตา / ภูมิภาค</p>
+    <div class="stat-line" id="statLine">กำลังโหลดข้อมูลจาก Google Form...</div>
+    <button class="rules-btn" id="rulesToggle">วิธีเล่น / สัญลักษณ์ ▾</button>
+    <div class="rules-panel" id="rulesPanel">
+      <div>พิมพ์ชื่อเพื่อนแล้วเลือกจากรายการ ระบบจะเทียบข้อมูลของคนที่คุณทายกับคำตอบที่ถูกต้อง</div>
+      <div class="legend-row"><div class="legend-swatch sw-correct">✓</div> <span><b>สีเขียว</b> = ข้อมูลตรงกับคำตอบ</span></div>
+      <div class="legend-row"><div class="legend-swatch sw-wrong">✕</div> <span><b>สีแดง</b> = ข้อมูลไม่ตรง</span></div>
+      <div class="legend-row"><div class="legend-swatch sw-wrong">↑</div> <span>ในช่อง <b>ส่วนสูง</b>: ลูกศรขึ้น = คำตอบสูงกว่าที่ทาย</span></div>
+      <div class="legend-row"><div class="legend-swatch sw-wrong">↓</div> <span>ในช่อง <b>ส่วนสูง</b>: ลูกศรลง = คำตอบเตี้ยกว่าที่ทาย</span></div>
+    </div>
+  </div>
+
+  <div class="input-panel">
+    <div class="input-shell">
+      <input type="text" id="guessInput" placeholder="พิมพ์ชื่อเพื่อน..." autocomplete="off">
+      <button class="go-btn" id="goBtn" disabled>➤</button>
+    </div>
+    <div class="suggestions" id="suggestions"></div>
+  </div>
+
+  <div class="grid-scroll">
+    <div class="grid-col-header">
+      <div class="col-label">อักขระ</div>
+      <div class="col-label">เพศ</div>
+      <div class="col-label">ส่วนสูง</div>
+      <div class="col-label">LAB</div>
+      <div class="col-label">แว่นตา</div>
+      <div class="col-label">ภูมิภาค</div>
+    </div>
+    <div id="guessList"></div>
+  </div>
+
+  <div class="win-banner" id="winBanner">
+    <div class="big" id="winText"></div>
+    <div class="sub" id="winSub"></div>
+    <button class="restart-btn" id="restartBtn">เล่นใหม่</button>
+  </div>
+
+  <div class="footer-note">CP-DLE · เกมทายตัวละครสไตล์ Wordle สำหรับสาขาคอมพิวเตอร์วิศวกรรม</div>
+</div>
+
+<script>
+const SHEET_ID = "1aVQeDXUpoflVSvIlMKtVVpbV9o3B6MMNFqATxXxl8a8";
+const GID = "958731995";
+const CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&gid=${GID}`;
+
+let PEOPLE = [];
+let HEIGHT_ORDER = [];
+
+function parseCSV(text){
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  for(let i = 0; i < text.length; i++){
+    const c = text[i];
+    if(inQuotes){
+      if(c === '"'){
+        if(text[i+1] === '"'){ field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else {
+      if(c === '"') inQuotes = true;
+      else if(c === ',') { row.push(field); field = ""; }
+      else if(c === '\n'){ row.push(field); rows.push(row); row = []; field = ""; }
+      else if(c === '\r'){ /* skip */ }
+      else field += c;
+    }
+  }
+  if(field.length || row.length){ row.push(field); rows.push(row); }
+  return rows;
+}
+
+function findColIndex(headers, keywords){
+  for(let i = 0; i < headers.length; i++){
+    if(keywords.some(k => headers[i].includes(k))) return i;
+  }
+  return -1;
+}
+
+function heightSortValue(h){
+  if(!h) return 0;
+  const t = h.trim();
+  if(t.startsWith('<')){ const n = parseFloat(t.slice(1)); return (isNaN(n)?0:n) - 1000; }
+  if(t.startsWith('>')){ const n = parseFloat(t.slice(1)); return (isNaN(n)?0:n) + 1000; }
+  const range = t.match(/(\d+)\s*-\s*(\d+)/);
+  if(range) return (parseFloat(range[1]) + parseFloat(range[2])) / 2;
+  const n = parseFloat(t);
+  return isNaN(n) ? 0 : n;
+}
+
+function buildHeightOrder(people){
+  const unique = Array.from(new Set(people.map(p => p.height).filter(Boolean)));
+  unique.sort((a, b) => heightSortValue(a) - heightSortValue(b));
+  return unique;
+}
+
+async function loadPeopleFromSheet(){
+  const res = await fetch(CSV_URL);
+  if(!res.ok) throw new Error('fetch failed: ' + res.status);
+  const text = await res.text();
+  const rows = parseCSV(text).filter(r => r.length && r.some(c => c.trim() !== ""));
+  if(rows.length < 2) throw new Error('no data rows');
+
+  const headers = rows[0].map(h => h.trim());
+  const idx = {
+    name:    findColIndex(headers, ["ชื่อเล่น", "ชื่อ"]),
+    gender:  findColIndex(headers, ["เพศ"]),
+    height:  findColIndex(headers, ["ส่วนสูง"]),
+    lab:     findColIndex(headers, ["Lab", "LAB", "lab"]),
+    glasses: findColIndex(headers, ["แว่น"]),
+    region:  findColIndex(headers, ["ภูมิภาค"]),
+  };
+
+  const map = new Map();
+  for(let i = 1; i < rows.length; i++){
+    const r = rows[i];
+    const name = (r[idx.name] || "").trim();
+    if(!name) continue;
+    map.set(name, {
+      name,
+      gender:  (r[idx.gender]  || "").trim(),
+      height:  (r[idx.height]  || "").trim(),
+      lab:     (r[idx.lab]     || "").trim(),
+      glasses: (r[idx.glasses] || "").trim(),
+      region:  (r[idx.region]  || "").trim(),
+    });
+  }
+  return Array.from(map.values());
+}
+
+const AVATAR_COLORS = ["#2DD4E8","#FFB454","#8CF0B4","#FF9D9D","#B79CFF","#7FD8FF","#FFD37F","#9CFFD8","#FF9DE0","#9CD1FF","#D8FF9C"];
+
+function initials(name){ return name.trim().slice(0,1); }
+function avatarColor(name){
+  let idx = 0;
+  for(const c of name) idx += c.charCodeAt(0);
+  return AVATAR_COLORS[idx % AVATAR_COLORS.length];
+}
+
+let secret = null;
+let guessedNames = new Set();
+let guessCount = 0;
+let won = false;
+
+const els = {
+  input: document.getElementById('guessInput'),
+  goBtn: document.getElementById('goBtn'),
+  suggestions: document.getElementById('suggestions'),
+  guessList: document.getElementById('guessList'),
+  statLine: document.getElementById('statLine'),
+  winBanner: document.getElementById('winBanner'),
+  winText: document.getElementById('winText'),
+  winSub: document.getElementById('winSub'),
+  restartBtn: document.getElementById('restartBtn'),
+  rulesToggle: document.getElementById('rulesToggle'),
+  rulesPanel: document.getElementById('rulesPanel'),
+};
+
+function newGame(){
+  const pool = PEOPLE.filter(p => !secret || p.name !== secret.name);
+  secret = (pool.length ? pool : PEOPLE)[Math.floor(Math.random()*(pool.length ? pool.length : PEOPLE.length))];
+  guessedNames = new Set();
+  guessCount = 0;
+  won = false;
+  els.guessList.innerHTML = "";
+  els.winBanner.classList.remove('show');
+  els.input.value = "";
+  els.input.disabled = false;
+  updateStat();
+}
+
+function updateStat(){
+  const remaining = PEOPLE.length - guessedNames.size;
+  els.statLine.textContent = `ทายไปแล้ว ${guessCount} ครั้ง · เหลือ ${remaining} คนในฐานข้อมูล`;
+}
+
+function renderSuggestions(){
+  const q = els.input.value.trim();
+  const candidates = PEOPLE.filter(p =>
+    !guessedNames.has(p.name) && (q === "" || p.name.includes(q))
+  );
+  els.goBtn.disabled = true;
+
+  if(won || candidates.length === 0){
+    els.suggestions.classList.remove('show');
+    els.suggestions.innerHTML = "";
+    return;
+  }
+
+  els.suggestions.innerHTML = "";
+  candidates.forEach((p, i) => {
+    const item = document.createElement('div');
+    item.className = 'suggestion-item';
+    item.dataset.name = p.name;
+    item.innerHTML = `<span class="mini-avatar" style="background:${avatarColor(p.name)}">${initials(p.name)}</span>${p.name}`;
+    item.addEventListener('click', () => submitGuess(p.name));
+    els.suggestions.appendChild(item);
+  });
+  els.suggestions.classList.add('show');
+}
+
+function submitGuess(name){
+  const person = PEOPLE.find(p => p.name === name);
+  if(!person || guessedNames.has(name) || won) return;
+
+  guessedNames.add(name);
+  guessCount++;
+
+  const row = document.createElement('div');
+  row.className = 'guess-row';
+
+  // name cell
+  const nameCell = document.createElement('div');
+  nameCell.className = 'cell name-cell' + (person.name === secret.name ? ' is-answer' : '');
+  nameCell.innerHTML = `<div class="avatar" style="background:${avatarColor(person.name)}">${initials(person.name)}</div><div>${person.name}</div>`;
+  row.appendChild(nameCell);
+
+  // gender cell
+  row.appendChild(makeSimpleCell(person.gender, person.gender === secret.gender));
+
+  // height cell
+  const gi = HEIGHT_ORDER.indexOf(person.height);
+  const si = HEIGHT_ORDER.indexOf(secret.height);
+  const heightCell = document.createElement('div');
+  if(gi === si){
+    heightCell.className = 'cell correct';
+    heightCell.innerHTML = `<div>${person.height}</div><div class="arrow">✓</div>`;
+  } else {
+    heightCell.className = 'cell wrong';
+    const arrow = gi < si ? '↑' : '↓';
+    heightCell.innerHTML = `<div>${person.height}</div><div class="arrow">${arrow}</div>`;
+  }
+  row.appendChild(heightCell);
+
+  // lab cell
+  row.appendChild(makeSimpleCell(person.lab, person.lab === secret.lab));
+
+  // glasses cell
+  row.appendChild(makeSimpleCell(person.glasses, person.glasses === secret.glasses));
+
+  // region cell
+  row.appendChild(makeSimpleCell(person.region, person.region === secret.region));
+
+  els.guessList.insertBefore(row, els.guessList.firstChild);
+  updateStat();
+
+  els.input.value = "";
+  renderSuggestions();
+
+  if(person.name === secret.name){
+    won = true;
+    els.input.disabled = true;
+    els.suggestions.classList.remove('show');
+    els.winText.textContent = `ถูกต้อง! คำตอบคือ ${secret.name}`;
+    els.winSub.textContent = `ใช้ไป ${guessCount} ครั้ง`;
+    els.winBanner.classList.add('show');
+  } else if(guessedNames.size >= PEOPLE.length){
+    els.input.disabled = true;
+    els.winText.textContent = `หมดตัวเลือกแล้ว! คำตอบคือ ${secret.name}`;
+    els.winSub.textContent = `ลองใหม่อีกครั้ง`;
+    els.winBanner.classList.add('show');
+  }
+}
+
+function makeSimpleCell(text, isCorrect){
+  const cell = document.createElement('div');
+  cell.className = 'cell ' + (isCorrect ? 'correct' : 'wrong');
+  cell.innerHTML = `<div>${text}</div><div class="arrow">${isCorrect ? '✓' : '✕'}</div>`;
+  return cell;
+}
+
+els.input.addEventListener('input', renderSuggestions);
+els.input.addEventListener('focus', renderSuggestions);
+els.input.addEventListener('click', renderSuggestions);
+els.input.addEventListener('keydown', (e) => {
+  if(e.key === 'Enter'){
+    const q = els.input.value.trim();
+    const match = PEOPLE.find(p => p.name === q && !guessedNames.has(p.name));
+    if(match){ submitGuess(match.name); return; }
+    const candidates = PEOPLE.filter(p => !guessedNames.has(p.name) && p.name.includes(q));
+    if(candidates.length === 1){ submitGuess(candidates[0].name); }
+  }
+});
+
+document.addEventListener('click', (e) => {
+  if(!e.target.closest('.input-panel')){
+    els.suggestions.classList.remove('show');
+  }
+});
+
+els.rulesToggle.addEventListener('click', () => {
+  els.rulesPanel.classList.toggle('show');
+  els.rulesToggle.textContent = els.rulesPanel.classList.contains('show')
+    ? 'วิธีเล่น / สัญลักษณ์ ▴' : 'วิธีเล่น / สัญลักษณ์ ▾';
+});
+
+els.restartBtn.addEventListener('click', newGame);
+
+async function init(){
+  els.input.disabled = true;
+  els.statLine.textContent = "กำลังโหลดข้อมูลจาก Google Form...";
+  try{
+    const people = await loadPeopleFromSheet();
+    if(people.length < 2) throw new Error('ข้อมูลในฟอร์มมีน้อยเกินไป (ต้องมีอย่างน้อย 2 คน)');
+    PEOPLE = people;
+    HEIGHT_ORDER = buildHeightOrder(PEOPLE);
+    newGame();
+  } catch(err){
+    console.error(err);
+    els.statLine.textContent = "โหลดข้อมูลจาก Google Form ไม่สำเร็จ ลองรีเฟรชหน้านี้อีกครั้ง";
+  }
+}
+
+init();
+</script>
+</body>
+</html>
